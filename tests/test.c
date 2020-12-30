@@ -1923,6 +1923,7 @@ void GC_CALLBACK warn_proc(char *msg, GC_word p)
       GC_noop1((GC_word)&Init);
 #   endif
     n_tests = 0;
+    GC_clear_exclusion_table(); /* no-op as called before GC init */
 #   if defined(MACOS)
         /* Make sure we have lots and lots of stack space.      */
         SetMinimumStack(cMinStackSpace);
@@ -1992,6 +1993,7 @@ void GC_CALLBACK warn_proc(char *msg, GC_word p)
          UNTESTED(GetSymbolNameFromStack);
 #      endif
        UNTESTED(GC_abort_on_oom);
+       UNTESTED(GC_get_allocd_bytes_per_finalizer);
        UNTESTED(GC_get_bytes_since_gc);
        UNTESTED(GC_get_dont_expand);
        UNTESTED(GC_get_dont_precollect);
@@ -2014,6 +2016,7 @@ void GC_CALLBACK warn_proc(char *msg, GC_word p)
        UNTESTED(GC_get_time_limit);
        UNTESTED(GC_get_warn_proc);
        UNTESTED(GC_is_disabled);
+       UNTESTED(GC_set_allocd_bytes_per_finalizer);
        UNTESTED(GC_set_dont_precollect);
        UNTESTED(GC_set_finalize_on_demand);
        UNTESTED(GC_set_finalizer_notifier);
@@ -2035,8 +2038,6 @@ void GC_CALLBACK warn_proc(char *msg, GC_word p)
        UNTESTED(GC_deinit);
        UNTESTED(GC_strndup);
        UNTESTED(GC_posix_memalign);
-       UNTESTED(GC_new_free_list);
-       UNTESTED(GC_new_kind);
        UNTESTED(GC_new_proc);
        UNTESTED(GC_clear_roots);
        UNTESTED(GC_exclude_static_roots);
@@ -2360,6 +2361,7 @@ int main(void)
       GC_use_threads_discovery();
       GC_printf("Using Darwin task-threads-based world stop and push\n");
 #   endif
+    GC_set_markers_count(0);
     GC_COND_INIT();
 
     if ((code = pthread_attr_init(&attr)) != 0) {
