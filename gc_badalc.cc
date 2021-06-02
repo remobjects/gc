@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2018-2019 Ivan Maidanski
+ * Copyright (c) 2018-2020 Ivan Maidanski
  *
  * THIS MATERIAL IS PROVIDED AS IS, WITH ABSOLUTELY NO WARRANTY EXPRESSED
  * OR IMPLIED.  ANY USE IS AT YOUR OWN RISK.
@@ -27,8 +27,6 @@
 #include "gc.h"
 
 #include <new> // for bad_alloc, precedes include of gc_cpp.h
-
-#include "gc_cpp.h" // for GC_NEW_ABORTS_ON_OOM
 
 #if defined(GC_NEW_ABORTS_ON_OOM) || defined(_LIBCPP_NO_EXCEPTIONS)
 # define GC_ALLOCATOR_THROW_OR_ABORT() GC_abort_on_oom()

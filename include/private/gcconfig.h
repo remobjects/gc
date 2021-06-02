@@ -1974,8 +1974,10 @@ EXTERN_C_BEGIN
         /* first putenv call.  Unfortunately, some clients do not obey. */
         extern char ** environ;
 #       define STACKBOTTOM ((ptr_t)environ)
-#     else
-#       define HEURISTIC2
+#     elif !defined(HEURISTIC2)
+        /* This uses pst_vm_status support. */
+#       define HPUX_MAIN_STACKBOTTOM
+#       define NEED_FIND_LIMIT
 #     endif
 #     define DYNAMIC_LOADING
       EXTERN_C_END
@@ -2932,7 +2934,7 @@ EXTERN_C_BEGIN
 #   define ALIGNMENT (CPP_WORDSZ/8)
 #   ifdef LINUX
 #     define OS_TYPE "LINUX"
-      extern int __data_start[];
+      extern int __data_start[] __attribute__((__weak__));
 #     define DATASTART ((ptr_t)__data_start)
 #     define LINUX_STACKBOTTOM
 #     define DYNAMIC_LOADING
@@ -3227,7 +3229,8 @@ EXTERN_C_BEGIN
 # define NO_SA_SIGACTION
 #endif
 
-#if defined(NO_SA_SIGACTION) && defined(MPROTECT_VDB) && !defined(DARWIN) \
+#if (defined(NO_SA_SIGACTION) || defined(GC_NO_SIGSETJMP)) \
+    && defined(MPROTECT_VDB) && !defined(DARWIN) \
     && !defined(MSWIN32) && !defined(MSWINCE)
 # undef MPROTECT_VDB
 #endif

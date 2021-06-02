@@ -3,7 +3,7 @@
  * Copyright (c) 1991-1994 by Xerox Corporation.  All rights reserved.
  * Copyright (c) 1996-1999 by Silicon Graphics.  All rights reserved.
  * Copyright (c) 1999-2004 Hewlett-Packard Development Company, L.P.
- *
+ * Copyright (c) 2008-2020 Ivan Maidanski
  *
  * THIS MATERIAL IS PROVIDED AS IS, WITH ABSOLUTELY NO WARRANTY EXPRESSED
  * OR IMPLIED.  ANY USE IS AT YOUR OWN RISK.
@@ -27,7 +27,8 @@
 #endif
 
 #if (defined(__linux__) || defined(__GLIBC__) || defined(__GNU__) \
-     || (defined(__CYGWIN__) && defined(GC_THREADS))) && !defined(_GNU_SOURCE)
+     || (defined(__CYGWIN__) && (defined(GC_THREADS) || !defined(USE_MMAP)))) \
+    && !defined(_GNU_SOURCE)
   /* Can't test LINUX, since this must be defined before other includes. */
 # define _GNU_SOURCE 1
 #endif
@@ -172,6 +173,14 @@ typedef int GC_bool;
 #else
 # define MACRO_BLKSTMT_BEGIN do {
 # define MACRO_BLKSTMT_END   } while (0)
+#endif
+
+#if defined(M68K) && defined(__GNUC__)
+  /* By default, __alignof__(word) is 2 on m68k.  Use this attribute to */
+  /* have proper word alignment (i.e. 4-byte on a 32-bit arch).         */
+# define GC_ATTR_WORD_ALIGNED __attribute__((__aligned__(sizeof(word))))
+#else
+# define GC_ATTR_WORD_ALIGNED /* empty */
 #endif
 
 #ifndef HEADERS_H
@@ -464,6 +473,7 @@ EXTERN_C_END
                  + (long)(a.tv_usec - b.tv_usec) % 1000) * 1000)
                         /* The total time difference could be computed as   */
                         /* MS_TIME_DIFF(a,b)*1000000+NS_FRAC_TIME_DIFF(a,b).*/
+
 #elif defined(MSWIN32) || defined(MSWINCE) || defined(WINXP_USE_PERF_COUNTER)
 # if defined(MSWINRT_FLAVOR) || defined(WINXP_USE_PERF_COUNTER)
 #   define CLOCK_TYPE ULONGLONG
@@ -484,6 +494,7 @@ EXTERN_C_END
 #   define MS_TIME_DIFF(a, b) ((unsigned long)((a) - (b)))
 #   define NS_FRAC_TIME_DIFF(a, b) 0UL
 # endif /* !WINXP_USE_PERF_COUNTER */
+
 #elif defined(NN_PLATFORM_CTR)
 # define CLOCK_TYPE long long
   EXTERN_C_BEGIN
@@ -493,7 +504,34 @@ EXTERN_C_END
 # define GET_TIME(x) (void)(x = n3ds_get_system_tick())
 # define MS_TIME_DIFF(a,b) ((unsigned long)n3ds_convert_tick_to_ms((a)-(b)))
 # define NS_FRAC_TIME_DIFF(a, b) 0UL /* TODO: implement it */
-#else /* !BSD_TIME && !NN_PLATFORM_CTR && !MSWIN32 && !MSWINCE */
+
+#elif defined(NINTENDO_SWITCH) \
+      || (((defined(LINUX) && defined(__USE_POSIX199309)) \
+           || defined(CYGWIN32)) && defined(_POSIX_TIMERS))
+# include <time.h>
+# define CLOCK_TYPE struct timespec
+# define CLOCK_TYPE_INITIALIZER { 0, 0 }
+# if defined(_POSIX_MONOTONIC_CLOCK) && !defined(NINTENDO_SWITCH)
+#   define GET_TIME(x) \
+                do { \
+                  if (clock_gettime(CLOCK_MONOTONIC, &x) == -1) \
+                    ABORT("clock_gettime failed"); \
+                } while (0)
+# else
+#   define GET_TIME(x) \
+                do { \
+                  if (clock_gettime(CLOCK_REALTIME, &x) == -1) \
+                    ABORT("clock_gettime failed"); \
+                } while (0)
+# endif
+# define MS_TIME_DIFF(a, b) \
+    /* a.tv_nsec - b.tv_nsec is in range -1e9 to 1e9 exclusively */ \
+    ((unsigned long)((a).tv_nsec + (1000000L*1000 - (b).tv_nsec)) / 1000000UL \
+     + ((unsigned long)((a).tv_sec - (b).tv_sec) * 1000UL) - 1000UL)
+# define NS_FRAC_TIME_DIFF(a, b) \
+    ((unsigned long)((a).tv_nsec + (1000000L*1000 - (b).tv_nsec)) % 1000000UL)
+
+#else /* !BSD_TIME && !NINTENDO_SWITCH && !NN_PLATFORM_CTR && !MSWIN32 */
 # include <time.h>
 # if defined(FREEBSD) && !defined(CLOCKS_PER_SEC)
 #   include <machine/limits.h>
@@ -1254,6 +1292,39 @@ typedef struct GC_ms_entry {
                         /* as described in gc_mark.h.                   */
 } mse;
 
+typedef int mark_state_t;   /* Current state of marking, as follows:    */
+                            /* Used to remember where we are during     */
+                            /* concurrent marking.                      */
+
+struct disappearing_link;
+struct finalizable_object;
+
+struct dl_hashtbl_s {
+    struct disappearing_link **head;
+    word entries;
+    unsigned log_size;
+};
+
+struct fnlz_roots_s {
+  struct finalizable_object **fo_head;
+  /* List of objects that should be finalized now: */
+  struct finalizable_object *finalize_now;
+};
+
+union toggle_ref_u {
+  /* The lowest bit is used to distinguish between choices.     */
+  void *strong_ref;
+  GC_hidden_pointer weak_ref;
+};
+
+/* Extended descriptors.  GC_typed_mark_proc understands these. */
+/* These are used for simple objects that are larger than what  */
+/* can be described by a BITMAP_BITS sized bitmap.              */
+typedef struct {
+    word ed_bitmap;     /* lsb corresponds to first word.       */
+    GC_bool ed_continued;       /* next entry is continuation.  */
+} typed_ext_descr_t;
+
 /* Lists of all heap blocks and free lists      */
 /* as well as other random data structures      */
 /* that should not be scanned by the            */
@@ -1314,8 +1385,19 @@ struct _GC_arrays {
         /* Bytes of memory explicitly deallocated while         */
         /* finalizers were running.  Used to approximate memory */
         /* explicitly deallocated by finalizers.                */
+  bottom_index *_all_bottom_indices;
+        /* Pointer to the first (lowest address) bottom_index;  */
+        /* assumes the lock is held.                            */
+  bottom_index *_all_bottom_indices_end;
+        /* Pointer to the last (highest address) bottom_index;  */
+        /* assumes the lock is held.                            */
+  ptr_t _scratch_free_ptr;
+  hdr *_hdr_free_list;
   ptr_t _scratch_end_ptr;
+        /* GC_scratch_end_ptr is end point of the current scratch area. */
   ptr_t _scratch_last_end_ptr;
+        /* GC_scratch_last_end_ptr is the end point of the last */
+        /* obtained scratch area.                               */
         /* Used by headers.c, and can easily appear to point to */
         /* heap.  Also used by GC_register_dynamic_libraries(). */
   mse *_mark_stack;
@@ -1341,10 +1423,97 @@ struct _GC_arrays {
 #   define GC_unmapped_bytes 0
 # endif
   bottom_index * _all_nils;
+# define GC_scan_ptr GC_arrays._scan_ptr
+  struct hblk * _scan_ptr;
+# ifdef PARALLEL_MARK
+#   define GC_main_local_mark_stack GC_arrays._main_local_mark_stack
+    mse *_main_local_mark_stack;
+#   define GC_first_nonempty GC_arrays._first_nonempty
+    volatile AO_t _first_nonempty;
+                        /* Lowest entry on mark stack that may be       */
+                        /* nonempty. Updated only by initiating thread. */
+# endif
+# define GC_mark_stack_size GC_arrays._mark_stack_size
+  size_t _mark_stack_size;
+# define GC_mark_state GC_arrays._mark_state
+  mark_state_t _mark_state; /* Initialized to MS_NONE (0). */
+# define GC_mark_stack_too_small GC_arrays._mark_stack_too_small
+  GC_bool _mark_stack_too_small;
+                        /* We need a larger mark stack.  May be set by  */
+                        /* client supplied mark routines.               */
+# define GC_objects_are_marked GC_arrays._objects_are_marked
+  GC_bool _objects_are_marked;
+                /* Are there collectible marked objects in the heap?    */
 # ifdef ENABLE_TRACE
 #   define GC_trace_addr GC_arrays._trace_addr
     ptr_t _trace_addr;
 # endif
+# define GC_n_heap_sects GC_arrays._n_heap_sects
+  word _n_heap_sects;   /* Number of separately added heap sections.    */
+# if defined(MSWIN32) || defined(MSWINCE) || defined(CYGWIN32)
+#   define GC_n_heap_bases GC_arrays._n_heap_bases
+    word _n_heap_bases; /* See GC_heap_bases.   */
+# endif
+# ifdef USE_PROC_FOR_LIBRARIES
+#   define GC_n_memory GC_arrays._n_memory
+    word _n_memory;     /* Number of GET_MEM allocated memory sections. */
+# endif
+# ifdef GC_GCJ_SUPPORT
+#   define GC_gcjobjfreelist GC_arrays._gcjobjfreelist
+    ptr_t *_gcjobjfreelist;
+# endif
+# define GC_fo_entries GC_arrays._fo_entries
+  word _fo_entries;
+# ifndef GC_NO_FINALIZATION
+#   define GC_dl_hashtbl GC_arrays._dl_hashtbl
+#   define GC_fnlz_roots GC_arrays._fnlz_roots
+#   define GC_log_fo_table_size GC_arrays._log_fo_table_size
+#   ifndef GC_LONG_REFS_NOT_NEEDED
+#     define GC_ll_hashtbl GC_arrays._ll_hashtbl
+      struct dl_hashtbl_s _ll_hashtbl;
+#   endif
+    struct dl_hashtbl_s _dl_hashtbl;
+    struct fnlz_roots_s _fnlz_roots;
+    unsigned _log_fo_table_size;
+#   ifndef GC_TOGGLE_REFS_NOT_NEEDED
+#     define GC_toggleref_arr GC_arrays._toggleref_arr
+#     define GC_toggleref_array_size GC_arrays._toggleref_array_size
+#     define GC_toggleref_array_capacity GC_arrays._toggleref_array_capacity
+      union toggle_ref_u *_toggleref_arr;
+      size_t _toggleref_array_size;
+      size_t _toggleref_array_capacity;
+#   endif
+# endif
+# ifdef TRACE_BUF
+#   define GC_trace_buf_ptr GC_arrays._trace_buf_ptr
+    int _trace_buf_ptr;
+# endif
+# ifdef ENABLE_DISCLAIM
+#   define GC_finalized_kind GC_arrays._finalized_kind
+    int _finalized_kind;
+# endif
+# define n_root_sets GC_arrays._n_root_sets
+# define GC_excl_table_entries GC_arrays._excl_table_entries
+  int _n_root_sets;     /* GC_static_roots[0..n_root_sets) contains the */
+                        /* valid root sets.                             */
+  size_t _excl_table_entries;   /* Number of entries in use.    */
+# ifdef THREADS
+#   define GC_roots_were_cleared GC_arrays._roots_were_cleared
+    GC_bool _roots_were_cleared;
+# endif
+# define GC_explicit_typing_initialized GC_arrays._explicit_typing_initialized
+# define GC_ed_size GC_arrays._ed_size
+# define GC_avail_descr GC_arrays._avail_descr
+# define GC_ext_descriptors GC_arrays._ext_descriptors
+# ifdef AO_HAVE_load_acquire
+    volatile AO_t _explicit_typing_initialized;
+# else
+    GC_bool _explicit_typing_initialized;
+# endif
+  size_t _ed_size;      /* Current size of above arrays.        */
+  size_t _avail_descr;  /* Next available slot.                 */
+  typed_ext_descr_t *_ext_descriptors;  /* Points to array of extended  */
+                                        /* descriptors.                 */
   GC_mark_proc _mark_procs[MAX_MARK_PROCS];
         /* Table of user-defined mark procedures.  There is     */
         /* a small number of these, which can be referenced     */
@@ -1469,6 +1638,10 @@ GC_API_PRIV GC_FAR struct _GC_arrays GC_arrays;
 #define GC_modws_valid_offsets GC_arrays._modws_valid_offsets
 #define GC_prev_heap_addr GC_arrays._prev_heap_addr
 #define GC_requested_heapsize GC_arrays._requested_heapsize
+#define GC_all_bottom_indices GC_arrays._all_bottom_indices
+#define GC_all_bottom_indices_end GC_arrays._all_bottom_indices_end
+#define GC_scratch_free_ptr GC_arrays._scratch_free_ptr
+#define GC_hdr_free_list GC_arrays._hdr_free_list
 #define GC_scratch_end_ptr GC_arrays._scratch_end_ptr
 #define GC_scratch_last_end_ptr GC_arrays._scratch_last_end_ptr
 #define GC_size_map GC_arrays._size_map
@@ -1552,14 +1725,6 @@ GC_EXTERN struct obj_kind {
 #endif
 
 GC_EXTERN unsigned GC_n_kinds;
-
-GC_EXTERN word GC_n_heap_sects; /* Number of separately added heap      */
-                                /* sections.                            */
-
-#ifdef USE_PROC_FOR_LIBRARIES
-  GC_EXTERN word GC_n_memory;   /* Number of GET_MEM allocated memory   */
-                                /* sections.                            */
-#endif
 
 GC_EXTERN size_t GC_page_size;
 
@@ -1946,7 +2111,7 @@ GC_INNER void GC_freehblk(struct hblk * p);
                                 /* Deallocate a heap block and mark it  */
                                 /* as invalid.                          */
 
-/*  Misc GC: */
+/*  Miscellaneous GC routines.  */
 GC_INNER GC_bool GC_expand_hp_inner(word n);
 GC_INNER void GC_start_reclaim(GC_bool abort_if_found);
                                 /* Restore unmarked objects to free     */
@@ -2251,8 +2416,6 @@ void GC_print_hblkfreelist(void);
 void GC_print_heap_sects(void);
 void GC_print_static_roots(void);
 
-extern word GC_fo_entries; /* should be visible in extra/MacOS.c */
-
 #ifdef KEEP_BACK_PTRS
    GC_INNER void GC_store_back_pointer(ptr_t source, ptr_t dest);
    GC_INNER void GC_marked_for_finalization(ptr_t dest);
@@ -2395,13 +2558,6 @@ GC_EXTERN signed_word GC_bytes_found;
   GC_INNER void GC_mark_thread_local_free_lists(void);
 #endif
 
-#ifdef GC_GCJ_SUPPORT
-# ifdef GC_ASSERTIONS
-    GC_EXTERN GC_bool GC_gcj_malloc_initialized; /* defined in gcj_mlc.c */
-# endif
-  GC_EXTERN ptr_t * GC_gcjobjfreelist;
-#endif
-
 #if defined(MPROTECT_VDB) && defined(GWW_VDB)
     GC_INNER GC_bool GC_gww_dirty_init(void);
                         /* Returns TRUE if GetWriteWatch is available.  */
@@ -2536,20 +2692,7 @@ GC_INNER void *GC_store_debug_info_inner(void *p, word sz, const char *str,
 #endif
 
 /* Check a compile time assertion at compile time.      */
-#if _MSC_VER >= 1700
-# define GC_STATIC_ASSERT(expr) \
-                static_assert(expr, "static assertion failed: " #expr)
-#elif defined(static_assert) && __STDC_VERSION__ >= 201112L
-# define GC_STATIC_ASSERT(expr) static_assert(expr, #expr)
-#elif defined(mips) && !defined(__GNUC__)
-/* DOB: MIPSPro C gets an internal error taking the sizeof an array type.
-   This code works correctly (ugliness is to avoid "unused var" warnings) */
-# define GC_STATIC_ASSERT(expr) \
-    do { if (0) { char j[(expr)? 1 : -1]; j[0]='\0'; j[0]=j[0]; } } while(0)
-#else
-  /* The error message for failure is a bit baroque, but ...    */
 # define GC_STATIC_ASSERT(expr) (void)sizeof(char[(expr)? 1 : -1])
-#endif
 
 /* Runtime check for an argument declared as non-null is actually not null. */
 #if GC_GNUC_PREREQ(4, 0)

@@ -36,9 +36,6 @@ struct roots GC_static_roots[MAX_ROOT_SETS];
 
 int GC_no_dls = 0;      /* Register dynamic library data segments.      */
 
-static int n_root_sets = 0;
-        /* GC_static_roots[0..n_root_sets) contains the valid root sets. */
-
 #if !defined(NO_DEBUGGING) || defined(GC_ASSERTIONS)
   /* Should return the same value as GC_root_size.      */
   GC_INNER word GC_compute_root_size(void)
@@ -271,15 +268,15 @@ void GC_add_roots_inner(ptr_t b, ptr_t e, GC_bool tmp)
     n_root_sets++;
 }
 
-static GC_bool roots_were_cleared = FALSE;
-
 GC_API void GC_CALL GC_clear_roots(void)
 {
     DCL_LOCK_STATE;
 
     if (!EXPECT(GC_is_initialized, TRUE)) GC_init();
     LOCK();
-    roots_were_cleared = TRUE;
+#   ifdef THREADS
+      GC_roots_were_cleared = TRUE;
+#   endif
     n_root_sets = 0;
     GC_root_size = 0;
 #   if !defined(MSWIN32) && !defined(MSWINCE) && !defined(CYGWIN32)
@@ -502,8 +499,11 @@ STATIC void GC_remove_tmp_roots(void)
 GC_INNER ptr_t GC_approx_sp(void)
 {
     volatile word sp;
-#   if defined(CPPCHECK) || (__GNUC__ >= 4 /* GC_GNUC_PREREQ(4, 0) */ \
-                             && !defined(STACK_NOT_SCANNED))
+#   if defined(S390) && !defined(CPPCHECK) && (__clang_major__ < 8)
+        /* Workaround a crash in SystemZTargetLowering of libLLVM-3.8.  */
+        sp = (word)&sp;
+#   elif defined(CPPCHECK) || (__GNUC__ >= 4 /* GC_GNUC_PREREQ(4, 0) */ \
+                               && !defined(STACK_NOT_SCANNED))
         /* TODO: Use GC_GNUC_PREREQ after fixing a bug in cppcheck. */
         sp = (word)__builtin_frame_address(0);
 #   else
@@ -529,7 +529,10 @@ struct exclusion GC_excl_table[MAX_EXCLUSIONS];
                                         -- address order.
 */
 
-STATIC size_t GC_excl_table_entries = 0;/* Number of entries in use.      */
+GC_API void GC_CALL GC_clear_exclusion_table(void)
+{
+    GC_excl_table_entries = 0;
+}
 
 /* Return the first exclusion range that includes an address >= start_addr */
 /* Assumes the exclusion table contains at least one entry (namely the     */
@@ -537,8 +540,10 @@ STATIC size_t GC_excl_table_entries = 0;/* Number of entries in use.      */
 STATIC struct exclusion * GC_next_exclusion(ptr_t start_addr)
 {
     size_t low = 0;
-    size_t high = GC_excl_table_entries - 1;
+    size_t high;
 
+    GC_ASSERT(GC_excl_table_entries > 0);
+    high = GC_excl_table_entries - 1;
     while (high > low) {
         size_t mid = (low + high) >> 1;
 
@@ -830,27 +835,6 @@ STATIC void GC_push_current_stack(ptr_t cold_gc_frame,
 
 GC_INNER void (*GC_push_typed_structures)(void) = 0;
 
-                        /* Push GC internal roots.  These are normally  */
-                        /* included in the static data segment, and     */
-                        /* Thus implicitly pushed.  But we must do this */
-                        /* explicitly if normal root processing is      */
-                        /* disabled.                                    */
-/*
- * Push GC internal roots.  Only called if there is some reason to believe
- * these would not otherwise get registered.
- */
-STATIC void GC_push_gc_structures(void)
-{
-#   ifndef GC_NO_FINALIZATION
-      GC_push_finalizer_structures();
-#   endif
-#   if defined(THREADS)
-      GC_push_thread_structures();
-#   endif
-    if( GC_push_typed_structures )
-      GC_push_typed_structures();
-}
-
 GC_INNER void GC_cond_register_dynamic_libraries(void)
 {
 # if (defined(DYNAMIC_LOADING) && !defined(MSWIN_XBOX1)) \
@@ -916,9 +900,15 @@ GC_INNER void GC_push_roots(GC_bool all, ptr_t cold_gc_frame GC_ATTR_UNUSED)
 
     /* Mark from GC internal roots if those might otherwise have        */
     /* been excluded.                                                   */
-    if (GC_no_dls || roots_were_cleared) {
-        GC_push_gc_structures();
-    }
+#   ifndef GC_NO_FINALIZATION
+        GC_push_finalizer_structures();
+#   endif
+#   ifdef THREADS
+        if (GC_no_dls || GC_roots_were_cleared)
+            GC_push_thread_structures();
+#   endif
+    if (GC_push_typed_structures)
+        GC_push_typed_structures();
 
     /* Mark thread local free lists, even if their mark        */
     /* descriptor excludes the link field.                     */

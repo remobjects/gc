@@ -2,6 +2,7 @@
  * Copyright 1988, 1989 Hans-J. Boehm, Alan J. Demers
  * Copyright (c) 1991-1994 by Xerox Corporation.  All rights reserved.
  * Copyright (c) 1999-2001 by Hewlett-Packard Company. All rights reserved.
+ * Copyright (c) 2008-2020 Ivan Maidanski
  *
  * THIS MATERIAL IS PROVIDED AS IS, WITH ABSOLUTELY NO WARRANTY EXPRESSED
  * OR IMPLIED.  ANY USE IS AT YOUR OWN RISK.
@@ -32,6 +33,10 @@
 # include <fcntl.h>
 # include <sys/types.h>
 # include <sys/stat.h>
+#endif
+
+#if defined(CONSOLE_LOG) && defined(MSWIN32) && defined(_MSC_VER)
+# include <io.h>
 #endif
 
 #ifdef NONSTOP
@@ -69,6 +74,10 @@
 #endif
 
 GC_FAR struct _GC_arrays GC_arrays /* = { 0 } */;
+
+GC_INNER unsigned GC_n_mark_procs = GC_RESERVED_MARK_PROCS;
+
+GC_INNER unsigned GC_n_kinds = GC_N_KINDS_INITIAL_VALUE;
 
 GC_INNER GC_bool GC_debugging_started = FALSE;
                 /* defined here so we don't have to load dbg_mlc.o */
@@ -677,6 +686,7 @@ GC_API void GC_CALL GC_get_heap_usage_safe(GC_word *pheap_size,
       }
       /* At this execution point, GC_setpagesize() and GC_init_win32()  */
       /* must already be called (for GET_MEM() to work correctly).      */
+      GC_ASSERT(GC_page_size != 0);
       content = (char *)GET_MEM(ROUNDUP_PAGESIZE_IF_MMAP((size_t)len + 1));
       if (content == NULL) {
         CloseHandle(hFile);
@@ -827,7 +837,7 @@ GC_API int GC_CALL GC_is_init_called(void)
       if (hU32) {
         FARPROC pfn = GetProcAddress(hU32, "MessageBoxA");
         if (pfn)
-          (void)(*(int (WINAPI *)(HWND, LPCSTR, LPCSTR, UINT))pfn)(
+          (void)(*(int (WINAPI *)(HWND, LPCSTR, LPCSTR, UINT))(word)pfn)(
                               NULL /* hWnd */, msg, caption, flags);
         (void)FreeLibrary(hU32);
       }
@@ -954,14 +964,14 @@ GC_API void GC_CALL GC_init(void)
 #     else
         {
 #         ifndef MSWINCE
-            BOOL (WINAPI *pfn)(LPCRITICAL_SECTION, DWORD) = 0;
+            FARPROC pfn = 0;
             HMODULE hK32 = GetModuleHandle(TEXT("kernel32.dll"));
             if (hK32)
-              pfn = (BOOL (WINAPI *)(LPCRITICAL_SECTION, DWORD))
-                      GetProcAddress(hK32,
-                                     "InitializeCriticalSectionAndSpinCount");
+              pfn = GetProcAddress(hK32,
+                                   "InitializeCriticalSectionAndSpinCount");
             if (pfn) {
-              pfn(&GC_allocate_ml, SPIN_COUNT);
+              (*(BOOL (WINAPI *)(LPCRITICAL_SECTION, DWORD))(word)pfn)(
+                                &GC_allocate_ml, SPIN_COUNT);
             } else
 #         endif /* !MSWINCE */
           /* else */ InitializeCriticalSection(&GC_allocate_ml);
@@ -1004,7 +1014,11 @@ GC_API void GC_CALL GC_init(void)
             if (0 != file_name)
 #         endif
           {
-            int log_d = open(file_name, O_CREAT | O_WRONLY | O_APPEND, 0644);
+#           if defined(_MSC_VER)
+              int log_d = _open(file_name, O_CREAT | O_WRONLY | O_APPEND);
+#           else
+              int log_d = open(file_name, O_CREAT | O_WRONLY | O_APPEND, 0644);
+#           endif
             if (log_d < 0) {
               GC_err_printf("Failed to open %s as log file\n", file_name);
             } else {
@@ -1745,6 +1759,9 @@ GC_API void GC_CALL GC_enable_incremental(void)
 #        ifdef GC_SOLARIS_THREADS
              int result = syscall(SYS_write, fd, buf + bytes_written,
                                              len - bytes_written);
+#        elif defined(_MSC_VER)
+             int result = _write(fd, buf + bytes_written,
+                                 (unsigned)(len - bytes_written));
 #        else
              int result = write(fd, buf + bytes_written, len - bytes_written);
 #        endif
@@ -2043,6 +2060,7 @@ GC_API unsigned GC_CALL GC_new_kind_inner(void **fl, GC_word descr,
 {
     unsigned result = GC_n_kinds;
 
+    GC_ASSERT(NONNULL_ARG_NOT_NULL(fl));
     GC_ASSERT(adjust == FALSE || adjust == TRUE);
     /* If an object is not needed to be cleared (when moved to the      */
     /* free list) then its descriptor should be zero to denote          */
@@ -2051,6 +2069,7 @@ GC_API unsigned GC_CALL GC_new_kind_inner(void **fl, GC_word descr,
     GC_ASSERT(clear == TRUE
               || (descr == 0 && adjust == FALSE && clear == FALSE));
     if (result < MAXOBJKINDS) {
+      GC_ASSERT(result > 0);
       GC_n_kinds++;
       GC_obj_kinds[result].ok_freelist = fl;
       GC_obj_kinds[result].ok_reclaim_list = 0;

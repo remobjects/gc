@@ -5,7 +5,7 @@
  * Copyright 1999 by Hewlett-Packard Company.  All rights reserved.
  * Copyright (C) 2007 Free Software Foundation, Inc
  * Copyright (c) 2000-2011 by Hewlett-Packard Development Company.
- * Copyright (c) 2009-2019 Ivan Maidanski
+ * Copyright (c) 2009-2020 Ivan Maidanski
  *
  * THIS MATERIAL IS PROVIDED AS IS, WITH ABSOLUTELY NO WARRANTY EXPRESSED
  * OR IMPLIED.  ANY USE IS AT YOUR OWN RISK.
@@ -94,13 +94,23 @@ GC_API GC_word GC_CALL GC_get_gc_no(void);
                         /* PARALLEL_MARK defined, and if either         */
                         /* GC_MARKERS (or GC_NPROCS) environment        */
                         /* variable is set to > 1, or multiple cores    */
-                        /* (processors) are available.  The getter does */
+                        /* (processors) are available, or the client    */
+                        /* calls GC_set_markers_count() before the GC   */
+                        /* initialization.  The getter does             */
                         /* not use or need synchronization (i.e.        */
                         /* acquiring the GC lock).  GC_parallel value   */
                         /* is equal to the number of marker threads     */
                         /* minus one (i.e. number of existing parallel  */
                         /* marker threads excluding the initiating one).*/
   GC_API int GC_CALL GC_get_parallel(void);
+
+  /* Set the number of marker threads (including the initiating one)    */
+  /* to the desired value at start-up.  Zero value means the collector  */
+  /* is to decide.  Has no effect if called after GC initialization.    */
+  /* If the correct non-zero value is passed, then GC_parallel should   */
+  /* be set to the value minus one.  The function does not use any      */
+  /* synchronization.                                                   */
+  GC_API void GC_CALL GC_set_markers_count(unsigned);
 #endif
 
 
@@ -417,6 +427,20 @@ struct GC_timeval_s {
 GC_API void GC_CALL GC_set_time_limit_tv(struct GC_timeval_s);
 GC_API struct GC_timeval_s GC_CALL GC_get_time_limit_tv(void);
 
+/* Set/get the minimum value of the ratio of allocated bytes since GC   */
+/* to the amount of finalizers created since that GC (value >           */
+/* GC_bytes_allocd / (GC_fo_entries - last_fo_entries)) which triggers  */
+/* the collection instead heap expansion.  The value has no effect in   */
+/* the GC incremental mode.  The default value is 10000 unless          */
+/* GC_ALLOCD_BYTES_PER_FINALIZER macro with a custom value is defined   */
+/* to build libgc.  The default value might be not the right choice for */
+/* clients where e.g. most objects have a finalizer.  Zero value        */
+/* effectively disables taking amount of finalizers in the decision     */
+/* whether to collect or not.  The functions do not use any             */
+/* synchronization.                                                     */
+GC_API void GC_CALL GC_set_allocd_bytes_per_finalizer(GC_word);
+GC_API GC_word GC_CALL GC_get_allocd_bytes_per_finalizer(void);
+
 /* Tell the collector to start various performance measurements.        */
 /* Only the total time taken by full collections is calculated, as      */
 /* of now.  And, currently, there is no way to stop the measurements.   */
@@ -617,6 +641,9 @@ GC_API void GC_CALL GC_set_max_heap_size(GC_word /* n */);
 /* Both section start and end are not needed to be pointer-aligned.     */
 GC_API void GC_CALL GC_exclude_static_roots(void * /* low_address */,
                                             void * /* high_address_plus_1 */);
+
+/* Clear the number of entries in the exclusion table.  Wizards only.   */
+GC_API void GC_CALL GC_clear_exclusion_table(void);
 
 /* Clear the set of root segments.  Wizards only.                       */
 GC_API void GC_CALL GC_clear_roots(void);
@@ -1990,6 +2017,14 @@ GC_API int GC_CALL GC_get_force_unmap_on_gcollect(void);
 # define GC_INIT_CONF_MAX_RETRIES /* empty */
 #endif
 
+#if defined(GC_ALLOCD_BYTES_PER_FINALIZER) && !defined(CPPCHECK)
+  /* Set GC_allocd_bytes_per_finalizer to the desired value at start-up. */
+# define GC_INIT_CONF_ALLOCD_BYTES_PER_FINALIZER \
+        GC_set_allocd_bytes_per_finalizer(GC_ALLOCD_BYTES_PER_FINALIZER)
+#else
+# define GC_INIT_CONF_ALLOCD_BYTES_PER_FINALIZER /* empty */
+#endif
+
 #if defined(GC_FREE_SPACE_DIVISOR) && !defined(CPPCHECK)
   /* Set GC_free_space_divisor to the desired value at start-up */
 # define GC_INIT_CONF_FREE_SPACE_DIVISOR \
@@ -2010,6 +2045,14 @@ GC_API int GC_CALL GC_get_force_unmap_on_gcollect(void);
 # define GC_INIT_CONF_TIME_LIMIT GC_set_time_limit(GC_TIME_LIMIT)
 #else
 # define GC_INIT_CONF_TIME_LIMIT /* empty */
+#endif
+
+#if defined(GC_MARKERS) && defined(GC_THREADS) && !defined(CPPCHECK)
+  /* Set the number of marker threads (including the initiating */
+  /* one) to the desired value at start-up.                     */
+# define GC_INIT_CONF_MARKERS GC_set_markers_count(GC_MARKERS)
+#else
+# define GC_INIT_CONF_MARKERS /* empty */
 #endif
 
 #if defined(GC_SIG_SUSPEND) && defined(GC_THREADS) && !defined(CPPCHECK)
@@ -2059,9 +2102,11 @@ GC_API int GC_CALL GC_get_force_unmap_on_gcollect(void);
 #define GC_INIT() { GC_INIT_CONF_DONT_EXPAND; /* pre-init */ \
                     GC_INIT_CONF_FORCE_UNMAP_ON_GCOLLECT; \
                     GC_INIT_CONF_MAX_RETRIES; \
+                    GC_INIT_CONF_ALLOCD_BYTES_PER_FINALIZER; \
                     GC_INIT_CONF_FREE_SPACE_DIVISOR; \
                     GC_INIT_CONF_FULL_FREQ; \
                     GC_INIT_CONF_TIME_LIMIT; \
+                    GC_INIT_CONF_MARKERS; \
                     GC_INIT_CONF_SUSPEND_SIGNAL; \
                     GC_INIT_CONF_THR_RESTART_SIGNAL; \
                     GC_INIT_CONF_MAXIMUM_HEAP_SIZE; \

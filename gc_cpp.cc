@@ -4,8 +4,11 @@
  * THIS MATERIAL IS PROVIDED AS IS, WITH ABSOLUTELY NO WARRANTY EXPRESSED
  * OR IMPLIED.  ANY USE IS AT YOUR OWN RISK.
  *
- * Permission is hereby granted to copy this code for any purpose,
- * provided the above notices are retained on all copies.
+ * Permission is hereby granted to use or copy this program
+ * for any purpose,  provided the above notices are retained on all copies.
+ * Permission to modify the code and to distribute modified code is granted,
+ * provided the above notices are retained, and a notice that the code was
+ * modified is included with the above copyright notice.
  */
 
 /*************************************************************************
@@ -32,7 +35,7 @@ built-in "new" and "delete".
 
 #include <new> // for bad_alloc, precedes include of gc_cpp.h
 
-#include "gc_cpp.h" // for GC_OPERATOR_NEW_ARRAY, GC_NOEXCEPT
+#include "gc_cpp.h" // for GC_OPERATOR_NEW_ARRAY
 
 #if !(defined(_MSC_VER) || defined(__DMC__)) || defined(GC_NO_INLINE_STD_NEW)
 
@@ -50,12 +53,12 @@ built-in "new" and "delete".
 # endif
 
 # ifdef GC_NEW_DELETE_NEED_THROW
-#   if __cplusplus < 201703L
-#     define GC_DECL_NEW_THROW throw(std::bad_alloc)
-#   else
-      // The "dynamic exception" syntax was deprecated in C++11
-      // and removed in C++17.
+#   if __cplusplus >= 201703L || _MSVC_LANG >= 201703L
+      // The "dynamic exception" syntax had been deprecated in C++11
+      // and was removed in C++17.
 #     define GC_DECL_NEW_THROW noexcept(false)
+#   else
+#     define GC_DECL_NEW_THROW throw(std::bad_alloc)
 #   endif
 # else
 #   define GC_DECL_NEW_THROW /* empty */
@@ -111,7 +114,7 @@ built-in "new" and "delete".
     }
 # endif // GC_OPERATOR_NEW_ARRAY
 
-# if __cplusplus > 201103L // C++14
+# if __cplusplus >= 201402L || _MSVC_LANG >= 201402L // C++14
     void operator delete(void* obj, size_t size) GC_NOEXCEPT {
       (void)size; // size is ignored
       GC_FREE(obj);

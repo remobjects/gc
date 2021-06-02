@@ -2,6 +2,7 @@
  * Copyright 1988, 1989 Hans-J. Boehm, Alan J. Demers
  * Copyright (c) 1991-1995 by Xerox Corporation.  All rights reserved.
  * Copyright (c) 2000 by Hewlett-Packard Company.  All rights reserved.
+ * Copyright (c) 2008-2020 Ivan Maidanski
  *
  * THIS MATERIAL IS PROVIDED AS IS, WITH ABSOLUTELY NO WARRANTY EXPRESSED
  * OR IMPLIED.  ANY USE IS AT YOUR OWN RISK.
@@ -56,10 +57,6 @@ GC_API void GC_CALL GC_noop1(word x)
     GC_noop_sink = x;
 }
 
-/* mark_proc GC_mark_procs[MAX_MARK_PROCS] = {0} -- declared in gc_priv.h */
-
-GC_INNER unsigned GC_n_mark_procs = GC_RESERVED_MARK_PROCS;
-
 /* Initialize GC_obj_kinds properly and standard free lists properly.   */
 /* This must be done statically since they may be accessed before       */
 /* GC_init is called.                                                   */
@@ -84,8 +81,6 @@ GC_INNER struct obj_kind GC_obj_kinds[MAXOBJKINDS] = {
 # endif
 };
 
-GC_INNER unsigned GC_n_kinds = GC_N_KINDS_INITIAL_VALUE;
-
 # ifndef INITIAL_MARK_STACK_SIZE
 #   define INITIAL_MARK_STACK_SIZE (1*HBLKSIZE)
                 /* INITIAL_MARK_STACK_SIZE * sizeof(mse) should be a    */
@@ -103,26 +98,9 @@ GC_INNER unsigned GC_n_kinds = GC_N_KINDS_INITIAL_VALUE;
                                 /* Used for logging only.               */
 #endif
 
-GC_INNER size_t GC_mark_stack_size = 0;
-
 #ifdef PARALLEL_MARK
-  STATIC volatile AO_t GC_first_nonempty = 0;
-        /* Lowest entry on mark stack   */
-        /* that may be nonempty.        */
-        /* Updated only by initiating   */
-        /* thread.                      */
-
   GC_INNER GC_bool GC_parallel_mark_disabled = FALSE;
 #endif
-
-GC_INNER mark_state_t GC_mark_state = MS_NONE;
-
-GC_INNER GC_bool GC_mark_stack_too_small = FALSE;
-
-static struct hblk * scan_ptr;
-
-STATIC GC_bool GC_objects_are_marked = FALSE;
-                /* Are there collectible marked objects in the heap?    */
 
 /* Is a collection in progress?  Note that this can return true in the  */
 /* non-incremental case, if a collection has been abandoned and the     */
@@ -239,7 +217,7 @@ GC_INNER void GC_clear_marks(void)
     GC_apply_to_all_blocks(clear_marks_for_block, (word)0);
     GC_objects_are_marked = FALSE;
     GC_mark_state = MS_INVALID;
-    scan_ptr = 0;
+    GC_scan_ptr = NULL;
 }
 
 /* Initiate a garbage collection.  Initiates a full collection if the   */
@@ -263,7 +241,7 @@ GC_INNER void GC_initiate_gc(void)
     } else if (GC_mark_state != MS_INVALID) {
         ABORT("Unexpected state");
     } /* Else this is really a full collection, and mark bits are invalid. */
-    scan_ptr = 0;
+    GC_scan_ptr = NULL;
 }
 
 #ifdef PARALLEL_MARK
@@ -317,8 +295,8 @@ static void alloc_mark_stack(size_t);
                 MARK_FROM_MARK_STACK();
                 break;
             } else {
-                scan_ptr = GC_push_next_marked_dirty(scan_ptr);
-                if (scan_ptr == 0) {
+                GC_scan_ptr = GC_push_next_marked_dirty(GC_scan_ptr);
+                if (NULL == GC_scan_ptr) {
 #                 if !defined(GC_DISABLE_INCREMENTAL)
                     GC_COND_LOG_PRINTF("Marked from %lu dirty pages\n",
                                        (unsigned long)GC_n_rescuing_pages);
@@ -343,8 +321,8 @@ static void alloc_mark_stack(size_t);
                 MARK_FROM_MARK_STACK();
                 break;
             } else {
-                scan_ptr = GC_push_next_marked_uncollectable(scan_ptr);
-                if (scan_ptr == 0) {
+                GC_scan_ptr = GC_push_next_marked_uncollectable(GC_scan_ptr);
+                if (NULL == GC_scan_ptr) {
                     GC_push_roots(TRUE, cold_gc_frame);
                     GC_objects_are_marked = TRUE;
                     if (GC_mark_state != MS_INVALID) {
@@ -397,7 +375,7 @@ static void alloc_mark_stack(size_t);
                 MARK_FROM_MARK_STACK();
                 break;
             }
-            if (scan_ptr == 0 && GC_mark_state == MS_INVALID) {
+            if (NULL == GC_scan_ptr && GC_mark_state == MS_INVALID) {
                 /* About to start a heap scan for marked objects. */
                 /* Mark stack is empty.  OK to reallocate.        */
                 if (GC_mark_stack_too_small) {
@@ -405,8 +383,8 @@ static void alloc_mark_stack(size_t);
                 }
                 GC_mark_state = MS_PARTIALLY_INVALID;
             }
-            scan_ptr = GC_push_next_marked(scan_ptr);
-            if (scan_ptr == 0 && GC_mark_state == MS_PARTIALLY_INVALID) {
+            GC_scan_ptr = GC_push_next_marked(GC_scan_ptr);
+            if (NULL == GC_scan_ptr && GC_mark_state == MS_PARTIALLY_INVALID) {
                 GC_push_roots(TRUE, cold_gc_frame);
                 GC_objects_are_marked = TRUE;
                 if (GC_mark_state != MS_INVALID) {
@@ -584,8 +562,7 @@ handle_ex:
         STOP_WORLD();
 #     endif
       GC_invalidate_mark_state();
-      scan_ptr = 0;
-
+      GC_scan_ptr = NULL;
       ret_val = FALSE;
       goto rm_handler;  /* Back to platform-specific code. */
   }
@@ -912,8 +889,6 @@ STATIC unsigned GC_active_count = 0;    /* Number of active helpers.    */
 
 GC_INNER word GC_mark_no = 0;
 
-static mse *main_local_mark_stack;
-
 #ifdef LINT2
 # define LOCAL_MARK_STACK_SIZE (HBLKSIZE / 8)
 #else
@@ -934,17 +909,19 @@ GC_INNER void GC_wait_for_markers_init(void)
 
   /* Allocate the local mark stack for the thread that holds GC lock.   */
 # ifndef CAN_HANDLE_FORK
-    GC_ASSERT(NULL == main_local_mark_stack);
+    GC_ASSERT(NULL == GC_main_local_mark_stack);
 # else
-    if (NULL == main_local_mark_stack)
+    if (NULL == GC_main_local_mark_stack)
 # endif
   {
     size_t bytes_to_get =
                 ROUNDUP_PAGESIZE_IF_MMAP(LOCAL_MARK_STACK_SIZE * sizeof(mse));
-    main_local_mark_stack = (mse *)GET_MEM(bytes_to_get);
-    if (NULL == main_local_mark_stack)
+
+    GC_ASSERT(GC_page_size != 0);
+    GC_main_local_mark_stack = (mse *)GET_MEM(bytes_to_get);
+    if (NULL == GC_main_local_mark_stack)
       ABORT("Insufficient memory for main local_mark_stack");
-    GC_add_to_our_memory((ptr_t)main_local_mark_stack, bytes_to_get);
+    GC_add_to_our_memory((ptr_t)GC_main_local_mark_stack, bytes_to_get);
   }
 
   /* Reuse marker lock and builders count to synchronize        */
@@ -1213,7 +1190,7 @@ STATIC void GC_do_parallel_mark(void)
     GC_help_wanted = TRUE;
     GC_notify_all_marker();
         /* Wake up potential helpers.   */
-    GC_mark_local(main_local_mark_stack, 0);
+    GC_mark_local(GC_main_local_mark_stack, 0);
     GC_help_wanted = FALSE;
     /* Done; clean up.  */
     while (GC_helper_count > 0) {
@@ -1528,8 +1505,6 @@ struct trace_entry {
     word arg1;
     word arg2;
 } GC_trace_buf[TRACE_ENTRIES] = { { NULL, 0, 0, 0, 0 } };
-
-int GC_trace_buf_ptr = 0;
 
 void GC_add_trace_entry(char *kind, word arg1, word arg2)
 {

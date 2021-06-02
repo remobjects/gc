@@ -160,6 +160,9 @@ size_t GetStackFramesFromContext(HANDLE hProcess, HANDLE hThread,
 #elif defined(_M_ALPHA64)
   machineType                 = IMAGE_FILE_MACHINE_ALPHA64;
   stackFrame.AddrPC.Offset    = context->Fir;
+#elif defined(_M_ARM64)
+  machineType                 = IMAGE_FILE_MACHINE_ARM64;
+  stackFrame.AddrPC.Offset    = context->Pc;
 #elif !defined(CPPCHECK)
 # error Unknown CPU
 #endif
